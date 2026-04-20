@@ -1,0 +1,290 @@
+METHOD get_attachset_create_entity.
+  "==============================================================================
+  " Method:    get_attachset_create_entity
+  " Purpose:   Creates attachment entities with PDF AI processing, GOS integration and Mail alert
+  " Developer: IVLDEV04 : KS
+  " Note:      Before any change — scope it first, ensure no side effects
+  "==============================================================================
+
+  "----------------------------------------------------------------------
+  " Data Declarations
+  "----------------------------------------------------------------------
+  DATA: ls_input_data       TYPE /bri/get_entity,
+        lv_xstring          TYPE xstring,
+        lv_len              TYPE i,
+        lv_objtype          TYPE sibflporb-typeid,
+        lv_objkey           TYPE sibflporb-instid,
+        lv_sood             TYPE sood1,
+        lv_object_id        TYPE so_obj_id,
+        lv_rc               TYPE sy-subrc,
+        lv_folder_id        TYPE soodk,
+        lt_srgbtbrel_status TYPE TABLE OF srgbtbrel,
+        lv_module           TYPE zbri_exp_de_modcod,
+        lv_filenmae         TYPE /ivld/exim_file_name.
+
+
+  DATA: l_api_response_h TYPE string,
+        l_api_response_i TYPE string,
+        l_api_response_e TYPE string.
+
+
+  DATA: l_mode      TYPE /ivld/de_apimod,
+        i_p_apiname TYPE /ivld/de_apiname.
+
+  DATA: lv_mode    TYPE /ivld/de_apimod,
+        lv_apiname TYPE /ivld/de_apiname.
+
+  DATA: lwa_json  TYPE /ivld/pdf_st_ic,
+        lwa_json1 TYPE /ivld/pdf_st_icitem,
+        lwa_json2 TYPE /ivld/st_pdfexpchecklist.
+
+  DATA: l_modedel      TYPE /bri/modedel.
+  DATA: lv_status      TYPE zbri_de_succstat.
+  DATA: e_succees_stat TYPE zbri_de_succstat,
+        e_reject_stat  TYPE zbri_de_succstat,
+        e_curr_stat    TYPE char75,
+        gv_status      TYPE smp_dyntxt,
+        gv_reject      TYPE smp_dyntxt.
+
+
+
+  DATA(lo) = NEW zbri_exim_cl_pdfai_ic( ).
+  DATA: go_exe TYPE REF TO /ivld/cx_exim_exception_class.
+
+
+  DATA: lt_solix  TYPE STANDARD TABLE OF solix WITH DEFAULT KEY,
+        lv_typeid TYPE swo_objtyp.
+
+  "----------------------------------------------------------------------
+  " Read Input Data from Entity
+  "----------------------------------------------------------------------
+  io_data_provider->read_entry_data(
+    IMPORTING
+      es_data = ls_input_data
+  ).
+  "----------------------------------------------------------------------
+  " Set The status for All Document Common.
+  "----------------------------------------------------------------------
+  l_modedel = ls_input_data-del_mode.
+
+  lv_module = SWITCH string( ls_input_data-doccat
+  WHEN 'EDST' THEN 'EXP'
+  WHEN 'BOE'  THEN 'BE'
+  ELSE |{ ls_input_data-doccat }| ).
+
+  SELECT SINGLE *
+    FROM zbri_docupld_tl
+    INTO @DATA(lwa_docupld_tl)
+    WHERE pdf_doc_code = @ls_input_data-pdfcode
+      AND status = 'X'.
+  IF sy-subrc = 0.
+    CALL METHOD zbri_cl_exp_cmn_utility=>get_pfstat
+      EXPORTING
+        i_modcode        = lv_module
+        i_currstat       = ls_input_data-status_pdf
+        i_modedel        = l_modedel
+        i_inco1          = ls_input_data-inco
+        i_cockpit_module = 'M'
+      IMPORTING
+        e_succees_stat   = e_succees_stat
+        e_reject_stat    = e_reject_stat
+        e_curr_text      = e_curr_stat
+        e_succ_pfstat    = gv_status
+        e_rejc_pfstat    = gv_reject.
+  ENDIF.
+  "----------------------------------------------------------------------
+  " Main Processing Logic - Document Category Processing
+  "----------------------------------------------------------------------
+  CASE ls_input_data-doccat.
+    WHEN 'NNDO'.
+      IF ls_input_data-pdfcode EQ 'CO' OR ls_input_data-pdfcode EQ 'FB'.
+      ELSE.
+        SELECT * FROM /ivld/pdf_temp INTO TABLE @DATA(lt_api) WHERE modulecode = 'NNDO'.
+        IF sy-subrc EQ 0.
+          IF ls_input_data-pdfcode = 'VI'.
+            lv_mode = VALUE #( lt_api[ doccode = ls_input_data-pdfcode ]-template_code OPTIONAL ).
+            lv_apiname = |PDF_{ lv_mode }|.
+          ELSEIF ls_input_data-pdfcode = 'BL' AND ls_input_data-del_mode = 'AIR'.
+            lv_mode = VALUE #( lt_api[ doccode = ls_input_data-pdfcode ]-template_code OPTIONAL ).
+            lv_apiname = |PDF_{ lv_mode }|.
+          ELSEIF ls_input_data-pdfcode = 'BL' AND ls_input_data-del_mode = 'COUR'.
+            lv_mode = VALUE #( lt_api[ doccode = ls_input_data-pdfcode ]-template_code OPTIONAL ).
+            lv_apiname = |PDF_{ lv_mode }|.
+          ELSEIF ls_input_data-pdfcode = 'BL'.
+            lv_mode = VALUE #( lt_api[ doccode = ls_input_data-pdfcode ]-template_code OPTIONAL ).
+            lv_apiname = |PDF_{ lv_mode }|.
+          ENDIF.
+        ENDIF.
+        IF lv_mode IS NOT INITIAL AND lv_apiname IS NOT   INITIAL.
+
+          zbri_exim_cl_pdfupld=>nndo_docu(
+            EXPORTING
+              ls_input_data = ls_input_data
+              e_mode = lv_mode
+              e_apiname = lv_apiname
+              IMPORTING e_status = lv_status
+          ).
+          IF lv_status IS NOT INITIAL.
+            e_succees_stat = lv_status.
+          ENDIF.
+          CLEAR : lv_apiname, lv_mode.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'CLIN'.
+
+      zbri_exim_cl_pdfupld=>clin_docu(
+        EXPORTING
+          ls_input_data = ls_input_data
+      ).
+
+    WHEN 'BOE'.
+
+      IF ls_input_data-status_pdf = '255' or ls_input_data-status_pdf = '126'. "ls_input_data-status_pdf = '127'.
+        zbri_exim_cl_pdfupld=>boe_docu(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+*              zbri_exim_cl_pdfupld=>BOE_DOCU_UPLD(
+*          EXPORTING
+*            ls_input_data = ls_input_data
+*        ).
+
+      ELSEIF  ls_input_data-status_pdf = '258' or ls_input_data-status_pdf = '259'.
+        zbri_exim_cl_pdfupld=>boe_docu_outboe(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+      ELSEIF ls_input_data-status_pdf = '262'.
+        zbri_exim_cl_pdfupld=>gos_common(
+        ls_input_data =  ls_input_data
+        ).
+      ENDIF.
+
+    WHEN 'EDST'.
+
+      IF e_succees_stat = '129'  OR e_succees_stat = '304'.
+        zbri_exim_cl_pdfupld=>edset_docu(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+      ELSEIF e_succees_stat = '160'.
+        zbri_exim_cl_pdfupld=>edset_sb_pdf(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+      ELSEIF e_succees_stat = '401'.
+        zbri_exim_cl_pdfupld=>edset_bl_pdf(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+      ELSEIF e_succees_stat = '300' AND ls_input_data-del_mode = 'SEA'.
+        zbri_exim_cl_pdfupld=>edset_eb_sea_pdf(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+      ELSEIF e_succees_stat = '300' AND ls_input_data-del_mode = 'AIR'.
+        zbri_exim_cl_pdfupld=>edset_eb_air_pdf(
+          EXPORTING
+            ls_input_data = ls_input_data
+        ).
+      ENDIF.
+    WHEN OTHERS.
+      "----------------------------------------------------------------------
+      " Standard Processing
+      "----------------------------------------------------------------------
+
+      CALL FUNCTION 'SCMS_BASE64_DECODE_STR'
+        EXPORTING
+          input  = ls_input_data-attachment
+        IMPORTING
+          output = lv_xstring.
+      "----------------------------------------------------------------------
+      " GOS (Generic Object Services) Processing
+      "----------------------------------------------------------------------
+
+
+      DATA(lv_instid) = |{ ls_input_data-docno }/{ ls_input_data-pdfcode }|.
+
+      lv_typeid = SWITCH string( ls_input_data-doccat
+        WHEN 'EDST' THEN '/BRI/EDSET'
+        ELSE |/BRI/{ ls_input_data-doccat }| ).
+
+
+      SELECT * FROM srgbtbrel
+        INTO TABLE lt_srgbtbrel_status
+        WHERE typeid_a = lv_typeid
+          AND reltype  = 'ATTA'
+          AND instid_a = lv_instid
+          AND catid_a  = 'BO'.
+
+
+      IF lines( lt_srgbtbrel_status ) > 0.
+        DELETE srgbtbrel FROM TABLE lt_srgbtbrel_status.
+        IF sy-subrc = 0.
+          COMMIT WORK.
+        ELSE.
+          ROLLBACK WORK.
+        ENDIF.
+      ENDIF.
+
+
+      TRY.
+          lv_filenmae = ls_input_data-filename.
+
+          zbri_exim_docset_files=>attach_binary_data(
+            EXPORTING
+              folder_name    = |{ ls_input_data-docno }/{ ls_input_data-pdfcode }|
+              binary_xstring = lv_xstring
+              file_name      = lv_filenmae
+              lv_objtyp      = lv_typeid
+          ).
+
+        CATCH /ivld/cx_exim_exception_class INTO go_exe.
+          MESSAGE go_exe TYPE 'E'.
+      ENDTRY.
+
+  ENDCASE.
+  "----------------------------------------------------------------------
+  "Status update and Mail Alert
+  "----------------------------------------------------------------------
+  IF e_succees_stat IS NOT INITIAL.
+    zbri_exim_cl_pdfupld=>status_mail(
+      EXPORTING
+        ls_input_data  =  ls_input_data
+        e_succees_stat =  e_succees_stat
+    ).
+  ENDIF.
+  IF ls_input_data-pdfcode = 'CO'.
+    zbri_exim_cl_pdfupld=>edset_co_pdf(
+    EXPORTING
+        ls_input_data = ls_input_data
+            ).
+  ENDIF.
+  IF ls_input_data-doccat = 'NNDO' AND ls_input_data-pdfcode = 'FB'.
+    zbri_exim_cl_pdfupld=>edset_co_pdf(
+    EXPORTING
+        ls_input_data = ls_input_data
+            ).
+    IF sy-subrc = 0.
+      DATA(status_pdf) =  '375' .
+      SELECT SINGLE *
+      FROM /bri/iiddochdr
+      INTO @DATA(wa_hdr)
+            WHERE docnr = @ls_input_data-docno .
+      UPDATE /bri/iiddochdr
+      SET   status_pdf  =  @status_pdf
+      WHERE doccat      = @ls_input_data-doccat
+      AND   docnr       = @ls_input_data-docno .
+    ENDIF.
+  ENDIF.
+
+*  IF ls_input_data-pdfcode IS NOT INITIAL.
+*    zbri_exim_cl_pdfupld=>gos_common(
+*    EXPORTING
+*        ls_input_data = ls_input_data
+*            ).
+*
+*  ENDIF.
+
+ENDMETHOD.
